@@ -1,0 +1,17 @@
+{
+  "name": "troorentio-telugu-stremio-addon",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "echo 'Vercel serverless ready'"
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
