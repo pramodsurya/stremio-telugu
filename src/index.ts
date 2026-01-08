@@ -11,54 +11,72 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders() });
     }
 
+    // Root - show configure page
     if (path === '' || path === '/') {
       const origin = `${url.protocol}//${url.host}`;
       return html(configurePage(origin));
     }
 
-    if (path === '/manifest.json') {
+    // Parse path: first segment might be the tmdbKey (base64url encoded)
+    const segments = path.split('/').filter(Boolean);
+    
+    // Check if first segment looks like a config token (base64 encoded key)
+    let tmdbKey: string | null = null;
+    let routeSegments = segments;
+    
+    if (segments.length > 0 && segments[0].length > 20 && !['manifest.json', 'catalog', 'meta', 'stream'].includes(segments[0])) {
+      // First segment is the encoded tmdbKey
+      try {
+        tmdbKey = decodeBase64Url(segments[0]);
+        routeSegments = segments.slice(1);
+      } catch {
+        // Not a valid base64, treat as route
+      }
+    }
+    
+    // Also check query param as fallback
+    if (!tmdbKey) {
+      tmdbKey = url.searchParams.get('tmdbKey') || env.TMDB_API_KEY || null;
+    }
+
+    const routePath = '/' + routeSegments.join('/');
+
+    // /manifest.json or /{config}/manifest.json
+    if (routePath === '/manifest.json') {
       return json(manifest);
     }
 
     // /catalog/:type/:id.json
-    if (path.startsWith('/catalog/')) {
-      const segments = path.split('/').filter(Boolean);
-      // segments: ["catalog", type, idWithJson]
-      if (segments.length >= 3) {
-        const type = segments[1];
-        const id = segments[2].replace(/\.json$/i, '');
+    if (routePath.startsWith('/catalog/')) {
+      const catSegments = routePath.split('/').filter(Boolean);
+      if (catSegments.length >= 3) {
+        const type = catSegments[1];
+        const id = catSegments[2].replace(/\.json$/i, '');
         const extra = parseExtra(url.searchParams.get('extra'));
-        const tmdbKey = getTmdbKey(url, env);
         if (!isKnownCatalog(id, type)) {
           return json({ metas: [] });
         }
-        if (id === 'latest-movies') {
-          return handleLatestMoviesCatalog(type, extra, env, tmdbKey).catch((err) => errorResponse(err));
-        }
-        // Other catalogs can be added later
-        return json({ metas: [] });
+        return handleCatalog(id, type, extra, tmdbKey).catch((err) => errorResponse(err));
       }
     }
 
     // /meta/:type/:id.json
-    if (path.startsWith('/meta/')) {
-      const segments = path.split('/').filter(Boolean);
-      if (segments.length >= 3) {
-        const type = segments[1];
-        const id = segments[2].replace(/\.json$/i, '');
-        const tmdbKey = getTmdbKey(url, env);
-        return handleMeta(type, id, env, tmdbKey).catch((err) => errorResponse(err));
+    if (routePath.startsWith('/meta/')) {
+      const metaSegments = routePath.split('/').filter(Boolean);
+      if (metaSegments.length >= 3) {
+        const type = metaSegments[1];
+        const id = metaSegments[2].replace(/\.json$/i, '');
+        return handleMeta(type, id, tmdbKey).catch((err) => errorResponse(err));
       }
     }
 
     // /stream/:type/:id.json
-    if (path.startsWith('/stream/')) {
-      const segments = path.split('/').filter(Boolean);
-      if (segments.length >= 3) {
-        const type = segments[1];
-        const id = segments[2].replace(/\.json$/i, '');
-        const tmdbKey = getTmdbKey(url, env);
-        return handleStream(type, id, env, tmdbKey).catch((err) => errorResponse(err));
+    if (routePath.startsWith('/stream/')) {
+      const streamSegments = routePath.split('/').filter(Boolean);
+      if (streamSegments.length >= 3) {
+        const type = streamSegments[1];
+        const id = streamSegments[2].replace(/\.json$/i, '');
+        return handleStream(type, id, tmdbKey).catch((err) => errorResponse(err));
       }
     }
 
@@ -66,11 +84,21 @@ export default {
   },
 };
 
+function encodeBase64Url(str: string): string {
+  return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function decodeBase64Url(str: string): string {
+  str = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (str.length % 4) str += '=';
+  return atob(str);
+}
+
 const manifest = {
-  id: 'com.troorentio.telugu',
+  id: 'com.telugu.catalog',
   version: '0.1.0',
-  name: 'Troorentio Telugu',
-  description: 'Telugu latest and must-watch catalog for Stremio (Troorentio-backed).',
+  name: 'Telugu Catalog',
+  description: 'Telugu Movies & Series for Stremio - Latest releases and Must-Watch collections.',
   resources: ['catalog', 'meta', 'stream'],
   types: ['movie', 'series'],
   idPrefixes: ['tmdb:', 'imdb:', 'tlg:'],
@@ -128,44 +156,253 @@ function isKnownCatalog(id: string, type: string) {
   return manifest.catalogs.some((c) => c.id === id && c.type === type);
 }
 
-async function handleLatestMoviesCatalog(type: string, extra: Record<string, unknown>, env: Env, tmdbKey: string | null): Promise<Response> {
+// Main catalog handler for all 4 catalogs
+async function handleCatalog(id: string, type: string, extra: Record<string, unknown>, tmdbKey: string | null): Promise<Response> {
   const search = typeof extra.search === 'string' ? extra.search.trim() : '';
-  const skip = Number.isFinite(extra.skip as number) ? Number(extra.skip) : 0;
-  const page = Math.floor(skip / 20) + 1; // TMDb pages are 1-based
+  const skip = typeof extra.skip === 'number' ? extra.skip : (typeof extra.skip === 'string' ? parseInt(extra.skip, 10) : 0);
+  const page = Math.floor(skip / 20) + 1;
 
+  if (type === 'movie') {
+    if (id === 'latest-movies') {
+      return fetchMovieCatalog('discover', 'primary_release_date.desc', page, search, tmdbKey);
+    }
+    if (id === 'must-watch-movies') {
+      return fetchMovieCatalog('discover', 'vote_average.desc', page, search, tmdbKey, true);
+    }
+  }
+  
+  if (type === 'series') {
+    if (id === 'latest-series') {
+      return fetchSeriesCatalog('discover', 'first_air_date.desc', page, search, tmdbKey);
+    }
+    if (id === 'must-watch-series') {
+      return fetchSeriesCatalog('discover', 'vote_average.desc', page, search, tmdbKey, true);
+    }
+  }
+
+  return json({ metas: [] });
+}
+
+async function fetchMovieCatalog(
+  endpoint: 'discover' | 'search',
+  sortBy: string,
+  page: number,
+  search: string,
+  tmdbKey: string | null,
+  mustWatch: boolean = false
+): Promise<Response> {
+  const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
+  
   const params = new URLSearchParams({
     with_original_language: 'te',
-    sort_by: search ? 'popularity.desc' : 'primary_release_date.desc',
     include_adult: 'false',
-    language: 'te-IN',
-    region: 'IN',
-    with_release_type: '3|4',
+    language: 'en-US',
     page: page.toString(),
+    'primary_release_date.lte': today,
   });
 
   if (search) {
     params.set('query', search);
+    params.set('with_original_language', 'te');
     const url = `https://api.themoviedb.org/3/search/movie?${params.toString()}`;
     const data = await tmdbFetch(url, tmdbKey);
-    const metas = (data.results || []).map(toMetaPreviewFromSearch);
-    return json({ metas });
+    const filteredResults = (data.results || [])
+      .filter((item: any) => item.release_date && item.release_date <= today);
+    
+    // Fetch release dates for each movie to check HD availability
+    const metasWithHD = await Promise.all(
+      filteredResults.slice(0, 20).map(async (item: any) => {
+        const releaseInfo = await getMovieReleaseInfo(item.id, tmdbKey);
+        return toMetaPreviewWithHD(item, 'movie', releaseInfo, today);
+      })
+    );
+    
+    // Filter to only show HD available movies
+    const metas = metasWithHD.filter(m => m.hdAvailable);
+    return json({ metas: metas.map(m => ({ ...m, hdAvailable: undefined })) });
+  }
+
+  params.set('sort_by', sortBy);
+  if (mustWatch) {
+    params.set('vote_count.gte', '100');
+    params.set('vote_average.gte', '7');
   }
 
   const url = `https://api.themoviedb.org/3/discover/movie?${params.toString()}`;
   const data = await tmdbFetch(url, tmdbKey);
-  const metas = (data.results || []).map(toMetaPreviewFromDiscover);
+  
+  // Fetch release dates for each movie to check HD availability
+  const metasWithHD = await Promise.all(
+    (data.results || []).slice(0, 20).map(async (item: any) => {
+      const releaseInfo = await getMovieReleaseInfo(item.id, tmdbKey);
+      return toMetaPreviewWithHD(item, 'movie', releaseInfo, today);
+    })
+  );
+  
+  // Filter to only show HD available movies
+  const metas = metasWithHD.filter(m => m.hdAvailable);
+  return json({ metas: metas.map(m => ({ ...m, hdAvailable: undefined })) });
+}
+
+// Fetch release dates for a movie (Digital = type 4, Physical = type 5)
+async function getMovieReleaseInfo(movieId: number, tmdbKey: string | null): Promise<{
+  theatricalDate: string | null;
+  digitalDate: string | null;
+  physicalDate: string | null;
+}> {
+  try {
+    const url = `https://api.themoviedb.org/3/movie/${movieId}/release_dates`;
+    const data = await tmdbFetch(url, tmdbKey);
+    
+    let theatricalDate: string | null = null;
+    let digitalDate: string | null = null;
+    let physicalDate: string | null = null;
+    
+    // Check all countries for release dates (prioritize IN for India, then US)
+    const countries = ['IN', 'US', 'GB'];
+    
+    for (const result of (data.results || [])) {
+      const countryCode = result.iso_3166_1;
+      const priority = countries.indexOf(countryCode);
+      
+      for (const release of (result.release_dates || [])) {
+        const date = release.release_date?.split('T')[0];
+        if (!date) continue;
+        
+        // Type 3 = Theatrical, Type 4 = Digital, Type 5 = Physical
+        if (release.type === 3 && (!theatricalDate || priority >= 0)) {
+          theatricalDate = date;
+        }
+        if (release.type === 4 && (!digitalDate || priority >= 0)) {
+          digitalDate = date;
+        }
+        if (release.type === 5 && (!physicalDate || priority >= 0)) {
+          physicalDate = date;
+        }
+      }
+    }
+    
+    return { theatricalDate, digitalDate, physicalDate };
+  } catch {
+    return { theatricalDate: null, digitalDate: null, physicalDate: null };
+  }
+}
+
+function toMetaPreviewWithHD(
+  item: any, 
+  type: 'movie' | 'series', 
+  releaseInfo: { theatricalDate: string | null; digitalDate: string | null; physicalDate: string | null },
+  today: string
+) {
+  const title = item.title || item.name || item.original_title || item.original_name;
+  const releaseDate = item.release_date || item.first_air_date;
+  
+  // Check if HD is available (digital or physical release date has passed)
+  const hdAvailable = (releaseInfo.digitalDate && releaseInfo.digitalDate <= today) ||
+                      (releaseInfo.physicalDate && releaseInfo.physicalDate <= today);
+  
+  // Build status badge for description
+  let badge = '';
+  if (releaseInfo.digitalDate && releaseInfo.digitalDate <= today) {
+    badge = '🟢 HD Available';
+  } else if (releaseInfo.physicalDate && releaseInfo.physicalDate <= today) {
+    badge = '📀 Blu-ray/DVD Available';
+  } else if (releaseInfo.theatricalDate && releaseInfo.theatricalDate <= today) {
+    badge = '🎬 In Theaters (HD Coming Soon)';
+  } else {
+    badge = '🔴 Coming Soon';
+  }
+  
+  // Add release dates to description
+  let releaseDetails = '';
+  if (releaseInfo.digitalDate) {
+    releaseDetails += `\n📺 Digital: ${releaseInfo.digitalDate}`;
+  }
+  if (releaseInfo.physicalDate) {
+    releaseDetails += `\n📀 Physical: ${releaseInfo.physicalDate}`;
+  }
+  
+  const description = `${badge}${releaseDetails}\n\n${item.overview || ''}`;
+  
+  return {
+    id: `tmdb:${item.id}`,
+    type,
+    name: title,
+    poster: imageUrl(item.poster_path, 'w342'),
+    background: imageUrl(item.backdrop_path, 'w780'),
+    year: releaseDate ? Number(releaseDate.slice(0, 4)) : undefined,
+    description: description.trim(),
+    hdAvailable: hdAvailable || false,
+  };
+}
+
+async function fetchSeriesCatalog(
+  endpoint: 'discover' | 'search',
+  sortBy: string,
+  page: number,
+  search: string,
+  tmdbKey: string | null,
+  mustWatch: boolean = false
+): Promise<Response> {
+  const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
+  
+  const params = new URLSearchParams({
+    with_original_language: 'te',
+    include_adult: 'false',
+    language: 'en-US',
+    page: page.toString(),
+    'first_air_date.lte': today,  // Only aired series (date <= today)
+  });
+
+  if (search) {
+    params.set('query', search);
+    params.set('with_original_language', 'te');
+    const url = `https://api.themoviedb.org/3/search/tv?${params.toString()}`;
+    const data = await tmdbFetch(url, tmdbKey);
+    // Filter search results to only include aired series
+    const metas = (data.results || [])
+      .filter((item: any) => item.first_air_date && item.first_air_date <= today)
+      .map((item: any) => toMetaPreview(item, 'series'));
+    return json({ metas });
+  }
+
+  params.set('sort_by', sortBy);
+  if (mustWatch) {
+    params.set('vote_count.gte', '50');
+    params.set('vote_average.gte', '7');
+  }
+
+  const url = `https://api.themoviedb.org/3/discover/tv?${params.toString()}`;
+  const data = await tmdbFetch(url, tmdbKey);
+  const metas = (data.results || []).map((item: any) => toMetaPreview(item, 'series'));
   return json({ metas });
 }
 
-async function handleMeta(type: string, id: string, env: Env, tmdbKey: string | null): Promise<Response> {
-  const { tmdbId, imdbId } = parseIds(id);
+function toMetaPreview(item: any, type: 'movie' | 'series') {
+  const title = item.title || item.name || item.original_title || item.original_name;
+  const releaseDate = item.release_date || item.first_air_date;
+  return {
+    id: `tmdb:${item.id}`,
+    type,
+    name: title,
+    poster: imageUrl(item.poster_path, 'w342'),
+    background: imageUrl(item.backdrop_path, 'w780'),
+    year: releaseDate ? Number(releaseDate.slice(0, 4)) : undefined,
+    description: item.overview,
+  };
+}
+
+async function handleMeta(type: string, id: string, tmdbKey: string | null): Promise<Response> {
+  const { tmdbId } = parseIds(id);
   if (!tmdbId) {
     return json({ meta: null });
   }
-  const url = `https://api.themoviedb.org/3/movie/${tmdbId}?` +
+  
+  const endpoint = type === 'series' ? 'tv' : 'movie';
+  const url = `https://api.themoviedb.org/3/${endpoint}/${tmdbId}?` +
     new URLSearchParams({
-      language: 'te-IN',
-      append_to_response: 'external_ids,watch/providers,credits,translations',
+      language: 'en-US',
+      append_to_response: 'external_ids,credits',
     }).toString();
 
   const data = await tmdbFetch(url, tmdbKey);
@@ -173,12 +410,12 @@ async function handleMeta(type: string, id: string, env: Env, tmdbKey: string | 
     return json({ meta: null });
   }
 
-  const meta = buildMetaObject(data, imdbId);
+  const meta = buildMetaObject(data, type);
   return json({ meta });
 }
 
-async function handleStream(type: string, id: string, env: Env, tmdbKey: string | null): Promise<Response> {
-  // Placeholder: Troorentio will supply actual streams.
+async function handleStream(type: string, id: string, tmdbKey: string | null): Promise<Response> {
+  // Placeholder: Streams would be provided by Troorentio or other sources
   return json({ streams: [] });
 }
 
@@ -192,65 +429,45 @@ function parseIds(id: string) {
   return { tmdbId: id, imdbId: null as string | null };
 }
 
-function toMetaPreviewFromDiscover(item: any) {
-  return {
-    id: `tmdb:${item.id}`,
-    type: 'movie',
-    name: item.title || item.original_title,
-    poster: imageUrl(item.poster_path, 'w342'),
-    background: imageUrl(item.backdrop_path, 'w780'),
-    year: item.release_date ? Number(item.release_date.slice(0, 4)) : undefined,
-    description: item.overview,
-  };
-}
-
-function toMetaPreviewFromSearch(item: any) {
-  return {
-    id: `tmdb:${item.id}`,
-    type: 'movie',
-    name: item.title || item.original_title,
-    poster: imageUrl(item.poster_path, 'w342'),
-    background: imageUrl(item.backdrop_path, 'w780'),
-    year: item.release_date ? Number(item.release_date.slice(0, 4)) : undefined,
-    description: item.overview,
-  };
-}
-
 function imageUrl(path: string | null | undefined, size: string) {
   return path ? `https://image.tmdb.org/t/p/${size}${path}` : undefined;
 }
 
-function buildMetaObject(data: any, imdbIdOverride: string | null) {
-  const imdbId = data.external_ids?.imdb_id || imdbIdOverride || undefined;
+function buildMetaObject(data: any, type: string) {
+  const imdbId = data.external_ids?.imdb_id || undefined;
   const directors = (data.credits?.crew || []).filter((c: any) => c.job === 'Director').slice(0, 2).map((c: any) => c.name);
   const cast = (data.credits?.cast || []).slice(0, 5).map((c: any) => c.name);
+  const title = data.title || data.name || data.original_title || data.original_name;
+  const releaseDate = data.release_date || data.first_air_date;
 
   return {
     id: `tmdb:${data.id}`,
-    type: 'movie',
-    name: data.title || data.original_title,
+    type,
+    name: title,
     poster: imageUrl(data.poster_path, 'w342'),
     background: imageUrl(data.backdrop_path, 'w780'),
-    logo: imageUrl(data.logo_path, 'w500'),
     imdbRating: data.vote_average ? Number(data.vote_average.toFixed(1)) : undefined,
-    releaseInfo: data.release_date,
+    releaseInfo: releaseDate,
     description: data.overview,
     genres: data.genres?.map((g: any) => g.name) || [],
     directors,
     cast,
-    runtime: data.runtime,
+    runtime: data.runtime || (data.episode_run_time?.[0]),
     links: imdbId ? [{ name: 'IMDb', category: 'external', url: `https://www.imdb.com/title/${imdbId}/` }] : [],
-    videos: [],
   };
 }
 
-async function tmdbFetch(url: string, providedKey: string | null) {
-  if (!providedKey) {
-    throw new Error('TMDb key is required');
+async function tmdbFetch(url: string, apiKey: string | null) {
+  if (!apiKey) {
+    throw new Error('TMDb API key is required');
   }
-  const res = await fetch(url, {
+  
+  // Append API key as query parameter (v3 API)
+  const separator = url.includes('?') ? '&' : '?';
+  const fullUrl = `${url}${separator}api_key=${apiKey}`;
+  
+  const res = await fetch(fullUrl, {
     headers: {
-      Authorization: `Bearer ${providedKey}`,
       Accept: 'application/json',
     },
   });
@@ -260,59 +477,102 @@ async function tmdbFetch(url: string, providedKey: string | null) {
   return res.json();
 }
 
-function getTmdbKey(url: URL, env: Env): string | null {
-  const fromQuery = url.searchParams.get('tmdbKey');
-  if (fromQuery && fromQuery.trim()) return fromQuery.trim();
-  if (env.TMDB_API_KEY) return env.TMDB_API_KEY;
-  return null;
-}
-
 function configurePage(origin: string) {
-  const manifestUrl = `${origin}/manifest.json`;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Troorentio Telugu Add-on</title>
+  <title>Telugu Catalog for Stremio</title>
   <style>
     :root { color-scheme: light dark; font-family: "Segoe UI", -apple-system, sans-serif; }
-    body { margin: 0; padding: 24px; max-width: 720px; }
-    h1 { margin-bottom: 8px; }
+    body { margin: 0; padding: 24px; max-width: 720px; background: #1a1a2e; color: #eee; }
+    h1 { margin-bottom: 8px; color: #fff; }
     p { margin-top: 0; line-height: 1.5; }
-    .card { border: 1px solid #ccc; padding: 16px; border-radius: 12px; }
-    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-    input { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #aaa; font-size: 14px; }
-    button, a.button { display: inline-block; padding: 10px 16px; border-radius: 10px; border: none; background: #0f7bff; color: white; text-decoration: none; font-weight: 600; cursor: pointer; }
-    code { padding: 2px 6px; border-radius: 6px; background: #eee; }
+    .card { border: 1px solid #444; padding: 16px; border-radius: 12px; background: #16213e; }
+    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+    input { flex: 1; padding: 12px; border-radius: 8px; border: 1px solid #555; font-size: 14px; background: #0f0f23; color: #fff; }
+    button, a.button { display: inline-block; padding: 12px 20px; border-radius: 10px; border: none; background: #7b2cbf; color: white; text-decoration: none; font-weight: 600; cursor: pointer; }
+    a.button:hover { background: #9d4edd; }
+    .catalogs { margin-top: 16px; }
+    .catalogs h4 { margin: 8px 0; color: #aaa; }
+    .catalogs ul { margin: 0; padding-left: 20px; }
+    .error { color: #ff6b6b; font-size: 14px; display: none; }
   </style>
 </head>
 <body>
-  <h1>Troorentio Telugu Add-on</h1>
-  <p>Install this Stremio add-on for Telugu catalogs (Latest, Must-Watch). Streams are provided by Troorentio separately.</p>
+  <h1>🎬 Telugu Catalog for Stremio</h1>
+  
   <div class="card">
-    <h3>Install via URL</h3>
-    <p style="margin-top:0;">Paste your TMDb v4 token (Bearer) locally. It is never stored on the server; it is only embedded in your install URL.</p>
-    <div class="row" style="margin-bottom:8px;">
-      <input id="tmdbKey" type="password" placeholder="TMDb v4 token (Bearer)" aria-label="TMDb v4 token" />
+    <h3>Configure & Install</h3>
+    <p>Enter your <strong>TMDb API Key</strong> (the short one like "6fbb9931a67d2c26ad9edb7c7eac6e81"):</p>
+    
+    <div class="row">
+      <input id="tmdbKey" type="text" placeholder="TMDb API Key (v3)" aria-label="TMDb API Key" />
     </div>
-    <div class="row" style="margin-bottom:8px;">
-      <input id="manifest" value="${manifestUrl}" readonly />
-      <a class="button" id="install" href="stremio://add-addon?url=${encodeURIComponent(manifestUrl)}">Install in Stremio</a>
+    
+    <p id="error" class="error">⚠️ Please enter your TMDb API Key first</p>
+    
+    <div class="row">
+      <a class="button" id="install" href="#">Install in Stremio</a>
+      <button id="copy" type="button">Copy Manifest URL</button>
     </div>
-    <p>After entering your TMDb token, copy the manifest URL above (it will include your token) and paste it in Stremio → Add-ons → Community → Install via URL. Do not share this URL.</p>
+    
+    <input type="hidden" id="manifest" />
+    
+    <div class="catalogs">
+      <h4>Available Catalogs:</h4>
+      <ul>
+        <li>📽️ Latest Telugu Movies</li>
+        <li>📺 Latest Telugu Series</li>
+        <li>⭐ Must Watch Movies (Top Rated)</li>
+        <li>⭐ Must Watch Series (Top Rated)</li>
+      </ul>
+    </div>
   </div>
+  
   <script>
     const base = ${JSON.stringify(origin)};
     const manifestInput = document.getElementById('manifest');
     const tmdbInput = document.getElementById('tmdbKey');
     const installLink = document.getElementById('install');
+    const copyBtn = document.getElementById('copy');
+    const errorEl = document.getElementById('error');
+    
+    function encodeBase64Url(str) {
+      return btoa(str).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+    }
+    
     function update() {
       const key = tmdbInput.value.trim();
-      const url = key ? base + '/manifest.json?tmdbKey=' + encodeURIComponent(key) : base + '/manifest.json';
-      manifestInput.value = url;
-      installLink.href = 'stremio://add-addon?url=' + encodeURIComponent(url);
+      if (key) {
+        const encoded = encodeBase64Url(key);
+        const url = base + '/' + encoded + '/manifest.json';
+        manifestInput.value = url;
+        installLink.href = 'stremio://' + url.replace(/^https?:\\\\/\\\\//, '');
+        errorEl.style.display = 'none';
+      } else {
+        manifestInput.value = '';
+        installLink.href = '#';
+        errorEl.style.display = 'block';
+      }
     }
+    
+    installLink.addEventListener('click', function(e) {
+      if (!tmdbInput.value.trim()) {
+        e.preventDefault();
+        errorEl.style.display = 'block';
+      }
+    });
+    
+    copyBtn.addEventListener('click', function() {
+      if (manifestInput.value) {
+        navigator.clipboard.writeText(manifestInput.value);
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => copyBtn.textContent = 'Copy URL', 2000);
+      }
+    });
+    
     tmdbInput.addEventListener('input', update);
     update();
   </script>
