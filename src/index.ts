@@ -202,18 +202,20 @@ async function fetchMovieCatalog(
   includeTheatrical: boolean = false
 ): Promise<Response> {
   const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
+  const TARGET_MOVIES = 50; // Target number of movies to show
+  const MAX_PAGES = 5; // Maximum pages to fetch from TMDb
   
   const params = new URLSearchParams({
     with_original_language: 'te',
     include_adult: 'false',
     language: 'en-US',
-    page: page.toString(),
     'primary_release_date.lte': today,
   });
 
   if (search) {
     params.set('query', search);
     params.set('with_original_language', 'te');
+    params.set('page', page.toString());
     const url = `https://api.themoviedb.org/3/search/movie?${params.toString()}`;
     const data = await tmdbFetch(url, tmdbKey);
     const filteredResults = (data.results || [])
@@ -249,21 +251,43 @@ async function fetchMovieCatalog(
     params.set('vote_average.gte', '7');
   }
 
-  const url = `https://api.themoviedb.org/3/discover/movie?${params.toString()}`;
-  const data = await tmdbFetch(url, tmdbKey);
+  // Fetch multiple pages to collect enough HD movies
+  const allMovies: any[] = [];
+  const hdMovies: any[] = [];
+  let currentPage = page;
   
-  // Fetch release dates for each movie to check HD availability
-  const metasWithHD = await Promise.all(
-    (data.results || []).slice(0, 20).map(async (item: any) => {
-      const releaseInfo = await getMovieReleaseInfo(item.id, tmdbKey);
-      return toMetaPreviewWithHD(item, 'movie', releaseInfo, today);
-    })
-  );
+  while (hdMovies.length < TARGET_MOVIES && currentPage < page + MAX_PAGES) {
+    params.set('page', currentPage.toString());
+    const url = `https://api.themoviedb.org/3/discover/movie?${params.toString()}`;
+    const data = await tmdbFetch(url, tmdbKey);
+    
+    if (!data.results || data.results.length === 0) break;
+    
+    // Fetch release dates for each movie to check HD availability
+    const metasWithHD = await Promise.all(
+      data.results.map(async (item: any) => {
+        const releaseInfo = await getMovieReleaseInfo(item.id, tmdbKey);
+        return toMetaPreviewWithHD(item, 'movie', releaseInfo, today);
+      })
+    );
+    
+    for (const meta of metasWithHD) {
+      allMovies.push(meta);
+      if (meta.hdAvailable) {
+        hdMovies.push(meta);
+      }
+    }
+    
+    currentPage++;
+    
+    // If includeTheatrical is ON, we just need the first batch
+    if (includeTheatrical && allMovies.length >= TARGET_MOVIES) break;
+  }
   
   // Filter based on includeTheatrical setting
   let metas = includeTheatrical 
-    ? metasWithHD 
-    : metasWithHD.filter(m => m.hdAvailable);
+    ? allMovies.slice(0, TARGET_MOVIES) 
+    : hdMovies.slice(0, TARGET_MOVIES);
   
   // Sort: theatrical (no HD) at top, then HD available
   if (includeTheatrical) {
