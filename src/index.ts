@@ -245,7 +245,7 @@ async function fetchMovieCatalog(
 
   params.set('sort_by', sortBy);
   if (mustWatch) {
-    params.set('vote_count.gte', '100');
+    params.set('vote_count.gte', '10'); // Lower threshold for Telugu movies (TMDb has fewer votes)
     params.set('vote_average.gte', '7');
   }
 
@@ -400,7 +400,7 @@ async function fetchSeriesCatalog(
 
   params.set('sort_by', sortBy);
   if (mustWatch) {
-    params.set('vote_count.gte', '50');
+    params.set('vote_count.gte', '10'); // Lower threshold for Telugu series (TMDb has fewer votes)
     params.set('vote_average.gte', '7');
   }
 
