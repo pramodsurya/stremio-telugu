@@ -17,17 +17,26 @@ export default {
       return html(configurePage(origin));
     }
 
-    // Parse path: first segment might be the tmdbKey (base64url encoded)
+    // Parse path: first segment might be the config (base64url encoded JSON)
     const segments = path.split('/').filter(Boolean);
     
-    // Check if first segment looks like a config token (base64 encoded key)
+    // Check if first segment looks like a config token (base64 encoded)
     let tmdbKey: string | null = null;
+    let includeTheatrical = false;
     let routeSegments = segments;
     
     if (segments.length > 0 && segments[0].length > 20 && !['manifest.json', 'catalog', 'meta', 'stream'].includes(segments[0])) {
-      // First segment is the encoded tmdbKey
+      // First segment is the encoded config
       try {
-        tmdbKey = decodeBase64Url(segments[0]);
+        const decoded = decodeBase64Url(segments[0]);
+        // Try to parse as JSON config, fallback to plain key
+        if (decoded.startsWith('{')) {
+          const config = JSON.parse(decoded);
+          tmdbKey = config.key || null;
+          includeTheatrical = config.includeTheatrical === true;
+        } else {
+          tmdbKey = decoded;
+        }
         routeSegments = segments.slice(1);
       } catch {
         // Not a valid base64, treat as route
@@ -56,7 +65,7 @@ export default {
         if (!isKnownCatalog(id, type)) {
           return json({ metas: [] });
         }
-        return handleCatalog(id, type, extra, tmdbKey).catch((err) => errorResponse(err));
+        return handleCatalog(id, type, extra, tmdbKey, includeTheatrical).catch((err) => errorResponse(err));
       }
     }
 
@@ -157,17 +166,17 @@ function isKnownCatalog(id: string, type: string) {
 }
 
 // Main catalog handler for all 4 catalogs
-async function handleCatalog(id: string, type: string, extra: Record<string, unknown>, tmdbKey: string | null): Promise<Response> {
+async function handleCatalog(id: string, type: string, extra: Record<string, unknown>, tmdbKey: string | null, includeTheatrical: boolean): Promise<Response> {
   const search = typeof extra.search === 'string' ? extra.search.trim() : '';
   const skip = typeof extra.skip === 'number' ? extra.skip : (typeof extra.skip === 'string' ? parseInt(extra.skip, 10) : 0);
   const page = Math.floor(skip / 20) + 1;
 
   if (type === 'movie') {
     if (id === 'latest-movies') {
-      return fetchMovieCatalog('discover', 'primary_release_date.desc', page, search, tmdbKey);
+      return fetchMovieCatalog('discover', 'primary_release_date.desc', page, search, tmdbKey, false, includeTheatrical);
     }
     if (id === 'must-watch-movies') {
-      return fetchMovieCatalog('discover', 'vote_average.desc', page, search, tmdbKey, true);
+      return fetchMovieCatalog('discover', 'vote_average.desc', page, search, tmdbKey, true, includeTheatrical);
     }
   }
   
@@ -189,7 +198,8 @@ async function fetchMovieCatalog(
   page: number,
   search: string,
   tmdbKey: string | null,
-  mustWatch: boolean = false
+  mustWatch: boolean = false,
+  includeTheatrical: boolean = false
 ): Promise<Response> {
   const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
   
@@ -217,9 +227,20 @@ async function fetchMovieCatalog(
       })
     );
     
-    // Filter to only show HD available movies
-    const metas = metasWithHD.filter(m => m.hdAvailable);
-    return json({ metas: metas.map(m => ({ ...m, hdAvailable: undefined })) });
+    // Filter based on includeTheatrical setting
+    let metas = includeTheatrical 
+      ? metasWithHD 
+      : metasWithHD.filter(m => m.hdAvailable);
+    
+    // Sort: theatrical (no HD) at top, then HD available
+    if (includeTheatrical) {
+      metas = metas.sort((a, b) => {
+        if (a.hdAvailable === b.hdAvailable) return 0;
+        return a.hdAvailable ? 1 : -1; // Non-HD (theatrical) first
+      });
+    }
+    
+    return json({ metas: metas.map(m => ({ ...m, hdAvailable: undefined, theatricalOnly: undefined })) });
   }
 
   params.set('sort_by', sortBy);
@@ -239,9 +260,20 @@ async function fetchMovieCatalog(
     })
   );
   
-  // Filter to only show HD available movies
-  const metas = metasWithHD.filter(m => m.hdAvailable);
-  return json({ metas: metas.map(m => ({ ...m, hdAvailable: undefined })) });
+  // Filter based on includeTheatrical setting
+  let metas = includeTheatrical 
+    ? metasWithHD 
+    : metasWithHD.filter(m => m.hdAvailable);
+  
+  // Sort: theatrical (no HD) at top, then HD available
+  if (includeTheatrical) {
+    metas = metas.sort((a, b) => {
+      if (a.hdAvailable === b.hdAvailable) return 0;
+      return a.hdAvailable ? 1 : -1; // Non-HD (theatrical) first
+    });
+  }
+  
+  return json({ metas: metas.map(m => ({ ...m, hdAvailable: undefined, theatricalOnly: undefined })) });
 }
 
 // Fetch release dates for a movie (Digital = type 4, Physical = type 5)
@@ -491,13 +523,17 @@ function configurePage(origin: string) {
     p { margin-top: 0; line-height: 1.5; }
     .card { border: 1px solid #444; padding: 16px; border-radius: 12px; background: #16213e; }
     .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
-    input { flex: 1; padding: 12px; border-radius: 8px; border: 1px solid #555; font-size: 14px; background: #0f0f23; color: #fff; }
+    input[type="text"] { flex: 1; padding: 12px; border-radius: 8px; border: 1px solid #555; font-size: 14px; background: #0f0f23; color: #fff; }
     button, a.button { display: inline-block; padding: 12px 20px; border-radius: 10px; border: none; background: #7b2cbf; color: white; text-decoration: none; font-weight: 600; cursor: pointer; }
     a.button:hover { background: #9d4edd; }
     .catalogs { margin-top: 16px; }
     .catalogs h4 { margin: 8px 0; color: #aaa; }
     .catalogs ul { margin: 0; padding-left: 20px; }
     .error { color: #ff6b6b; font-size: 14px; display: none; }
+    .checkbox-row { display: flex; align-items: center; gap: 10px; margin: 16px 0; padding: 12px; background: #0f0f23; border-radius: 8px; border: 1px solid #555; }
+    .checkbox-row input[type="checkbox"] { width: 20px; height: 20px; accent-color: #7b2cbf; cursor: pointer; }
+    .checkbox-row label { cursor: pointer; flex: 1; }
+    .checkbox-row .hint { font-size: 12px; color: #888; margin-top: 4px; }
   </style>
 </head>
 <body>
@@ -509,6 +545,14 @@ function configurePage(origin: string) {
     
     <div class="row">
       <input id="tmdbKey" type="text" placeholder="TMDb API Key (v3)" aria-label="TMDb API Key" />
+    </div>
+    
+    <div class="checkbox-row">
+      <input type="checkbox" id="includeTheatrical" />
+      <div>
+        <label for="includeTheatrical">🎬 Include theatrical releases (no HD yet)</label>
+        <div class="hint">Show movies currently in theaters at the top of the catalog. These won't have HD streams available.</div>
+      </div>
     </div>
     
     <p id="error" class="error">⚠️ Please enter your TMDb API Key first</p>
@@ -535,6 +579,7 @@ function configurePage(origin: string) {
     const base = ${JSON.stringify(origin)};
     const manifestInput = document.getElementById('manifest');
     const tmdbInput = document.getElementById('tmdbKey');
+    const theatricalCheckbox = document.getElementById('includeTheatrical');
     const installLink = document.getElementById('install');
     const copyBtn = document.getElementById('copy');
     const errorEl = document.getElementById('error');
@@ -545,8 +590,12 @@ function configurePage(origin: string) {
     
     function update() {
       const key = tmdbInput.value.trim();
+      const includeTheatrical = theatricalCheckbox.checked;
+      
       if (key) {
-        const encoded = encodeBase64Url(key);
+        // Encode config as JSON with key and options
+        const config = JSON.stringify({ key: key, includeTheatrical: includeTheatrical });
+        const encoded = encodeBase64Url(config);
         const url = base + '/' + encoded + '/manifest.json';
         manifestInput.value = url;
         installLink.href = 'stremio://' + url.replace(/^https?:\\\\/\\\\//, '');
@@ -574,6 +623,7 @@ function configurePage(origin: string) {
     });
     
     tmdbInput.addEventListener('input', update);
+    theatricalCheckbox.addEventListener('change', update);
     update();
   </script>
 </body>
