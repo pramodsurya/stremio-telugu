@@ -113,6 +113,7 @@ const manifest = {
   idPrefixes: ['tmdb:', 'imdb:', 'tlg:'],
   catalogs: [
     { id: 'latest-movies', type: 'movie', name: 'Latest Telugu Movies', extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }] },
+    { id: 'latest-hd-movies', type: 'movie', name: 'Latest Telugu HD Movies', extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }] },
     { id: 'latest-series', type: 'series', name: 'Latest Telugu Series', extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }] },
     { id: 'must-watch-movies', type: 'movie', name: 'Must Watch Movies', extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }] },
     { id: 'must-watch-series', type: 'series', name: 'Must Watch Series', extra: [{ name: 'search', isRequired: false }, { name: 'skip', isRequired: false }] },
@@ -174,6 +175,10 @@ async function handleCatalog(id: string, type: string, extra: Record<string, unk
   if (type === 'movie') {
     if (id === 'latest-movies') {
       return fetchMovieCatalog('discover', 'primary_release_date.desc', page, search, tmdbKey, false, includeTheatrical);
+    }
+    if (id === 'latest-hd-movies') {
+      // HD Movies catalog - always filter to HD only, ignore includeTheatrical
+      return fetchMovieCatalog('discover', 'primary_release_date.desc', page, search, tmdbKey, false, false);
     }
     if (id === 'must-watch-movies') {
       return fetchMovieCatalog('discover', 'vote_average.desc', page, search, tmdbKey, true, includeTheatrical);
@@ -424,16 +429,37 @@ async function fetchSeriesCatalog(
   params.set('sort_by', sortBy);
   
   if (mustWatch) {
-    // For Must Watch: Include popular Indian series (Telugu + Hindi dubbed)
-    // Fetch both Telugu original and Indian series
-    params.set('with_origin_country', 'IN');
-    params.set('vote_count.gte', '20');
-    params.set('vote_average.gte', '7.5');
+    // For Must Watch: First get Telugu original series, then Indian dubbed
+    const allMetas: any[] = [];
     
-    const url = `https://api.themoviedb.org/3/discover/tv?${params.toString()}`;
-    const data = await tmdbFetch(url, tmdbKey);
-    const metas = (data.results || []).map((item: any) => toMetaPreview(item, 'series'));
-    return json({ metas });
+    // 1. First fetch Telugu original series (top 5)
+    const teluguParams = new URLSearchParams(params);
+    teluguParams.set('with_original_language', 'te');
+    teluguParams.set('vote_count.gte', '3'); // Lower threshold for Telugu
+    teluguParams.set('vote_average.gte', '7');
+    teluguParams.set('sort_by', sortBy);
+    
+    const teluguUrl = `https://api.themoviedb.org/3/discover/tv?${teluguParams.toString()}`;
+    const teluguData = await tmdbFetch(teluguUrl, tmdbKey);
+    const teluguMetas = (teluguData.results || []).slice(0, 5).map((item: any) => toMetaPreview(item, 'series'));
+    allMetas.push(...teluguMetas);
+    
+    // 2. Then fetch popular Indian series (Hindi dubbed available)
+    const indianParams = new URLSearchParams(params);
+    indianParams.set('with_origin_country', 'IN');
+    indianParams.set('vote_count.gte', '50');
+    indianParams.set('vote_average.gte', '7.5');
+    indianParams.set('sort_by', sortBy);
+    
+    const indianUrl = `https://api.themoviedb.org/3/discover/tv?${indianParams.toString()}`;
+    const indianData = await tmdbFetch(indianUrl, tmdbKey);
+    const indianMetas = (indianData.results || [])
+      .filter((item: any) => item.original_language !== 'te') // Avoid duplicates
+      .slice(0, 45)
+      .map((item: any) => toMetaPreview(item, 'series'));
+    allMetas.push(...indianMetas);
+    
+    return json({ metas: allMetas });
   } else {
     // For Latest: Telugu original series only
     params.set('with_original_language', 'te');
@@ -603,9 +629,10 @@ function configurePage(origin: string) {
       <h4>Available Catalogs:</h4>
       <ul>
         <li>📽️ Latest Telugu Movies</li>
+        <li>🎬 Latest Telugu HD Movies</li>
         <li>📺 Latest Telugu Series</li>
         <li>⭐ Must Watch Movies (Top Rated)</li>
-        <li>⭐ Must Watch Series (Top Rated)</li>
+        <li>⭐ Must Watch Series (Telugu + Indian)</li>
       </ul>
     </div>
   </div>
