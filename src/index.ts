@@ -622,7 +622,8 @@ function configurePage(origin: string) {
         const encoded = encodeBase64Url(config);
         const url = base + '/' + encoded + '/manifest.json';
         manifestInput.value = url;
-        installLink.href = 'stremio://' + url.replace(/^https?:\\\\/\\\\//, '');
+        // Use the correct Stremio deep link format
+        installLink.href = url.replace(/^https?:\\/\\//, 'stremio://');
         errorEl.style.display = 'none';
       } else {
         manifestInput.value = '';
