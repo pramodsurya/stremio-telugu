@@ -403,7 +403,6 @@ async function fetchSeriesCatalog(
   const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
   
   const params = new URLSearchParams({
-    with_original_language: 'te',
     include_adult: 'false',
     language: 'en-US',
     page: page.toString(),
@@ -423,9 +422,21 @@ async function fetchSeriesCatalog(
   }
 
   params.set('sort_by', sortBy);
+  
   if (mustWatch) {
-    params.set('vote_count.gte', '10'); // Lower threshold for Telugu series (TMDb has fewer votes)
-    params.set('vote_average.gte', '7');
+    // For Must Watch: Include popular Indian series (Telugu + Hindi dubbed)
+    // Fetch both Telugu original and Indian series
+    params.set('with_origin_country', 'IN');
+    params.set('vote_count.gte', '20');
+    params.set('vote_average.gte', '7.5');
+    
+    const url = `https://api.themoviedb.org/3/discover/tv?${params.toString()}`;
+    const data = await tmdbFetch(url, tmdbKey);
+    const metas = (data.results || []).map((item: any) => toMetaPreview(item, 'series'));
+    return json({ metas });
+  } else {
+    // For Latest: Telugu original series only
+    params.set('with_original_language', 'te');
   }
 
   const url = `https://api.themoviedb.org/3/discover/tv?${params.toString()}`;
